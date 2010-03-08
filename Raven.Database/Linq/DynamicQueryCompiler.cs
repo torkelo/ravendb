@@ -48,14 +48,11 @@ namespace Raven.Database.Linq
                 GenerateInMemory = false,
                 IncludeDebugInformation = true,
                 ReferencedAssemblies =
-                                                                 {
-                                                                     typeof (AbstractIndexGenerator).Assembly
-                                                                 .Location,
-                                                                     typeof (NameValueCollection).Assembly.
-                                                                 Location,
-                                                                     typeof (Enumerable).Assembly.Location,
-                                                                     typeof (Binder).Assembly.Location,
-                                                                 },
+                {
+                    typeof (AbstractIndexGenerator).Assembly.Location,
+                    typeof (NameValueCollection).Assembly.Location,
+                    typeof (Enumerable).Assembly.Location,typeof (Binder).Assembly.Location,
+                },
             }, CompiledQueryText);
 
             if (results.Errors.HasErrors)
