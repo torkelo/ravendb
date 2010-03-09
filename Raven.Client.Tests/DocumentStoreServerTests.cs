@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Threading;
 using Raven.Database;
@@ -99,6 +100,33 @@ namespace Raven.Client.Tests
             }
         }
 
+        [Fact]
+        public void Should_query_database_via_index()
+        {
+            DivanServer.EnsureCanListenToWhenInNonAdminContext(8080);
+            using (var server = new DivanServer(new RavenConfiguration { Port = 8080, DataDirectory = path }))
+            {
+                var documentStore = new DocumentStore("localhost", 8080);
+                documentStore.Initialise();
+                documentStore.DatabaseCommands.PutIndex("getByName", "from entity in docs select new { entity.type, entity.Name };");
+
+                var session = documentStore.OpenSession();
+                
+                session.Store(new Company { Name = "Company" });
+                session.Store(new Company { Name = "Company" });
+                session.Store(new Company { Name = "Bobs Builders" });
+
+
+                var query = from company in session.Query<Company>("getByName")
+                            where company.Name == "Company"
+                            select company;
+
+                // Should translate to 
+                //documentStore.DatabaseCommands.Query("getByName", ":name=\"Company\"", 0, int.MaxValue);
+
+                Assert.Equal(2, query.ToList().Count);
+            }
+        }
 
         public void Dispose()
         {

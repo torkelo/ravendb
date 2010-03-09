@@ -51,7 +51,7 @@ namespace Raven.Client
             DatabaseCommands.PutIndex("getByType", "from entity in docs select new { entity.type };");
         }
 
-        private IDatabaseCommands DatabaseCommands;
+        public IDatabaseCommands DatabaseCommands; // This should be private, but I've made it public temporarily
 
         public void Delete(Guid id)
         {

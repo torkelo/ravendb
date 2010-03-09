@@ -4,6 +4,7 @@ using System.Text;
 using System.Threading;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using Raven.Client.Linq;
 using Raven.Database;
 using Raven.Database.Data;
 
@@ -85,10 +86,9 @@ namespace Raven.Client
             return objectAsJson;
         }
 
-        public IQueryable<T> Query<T>()
+        public IQueryable<T> Query<T>(string indexName)
         {
-            // Todo implement Linq to Lucene here instead of the horrible list all below.
-            return GetAll<T>().AsQueryable();
+            return new DocumentQuery<T>(new DocumentQueryProvider(database, indexName));
         }
 
         public IList<T> GetAll<T>() // NOTE: We probably need to ask the user if they can accept stale results
