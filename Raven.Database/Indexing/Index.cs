@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Dynamic;
 using System.Linq;
 using System.Threading;
 using log4net;
@@ -15,6 +16,7 @@ using Raven.Database.Data;
 using Raven.Database.Extensions;
 using Raven.Database.Linq;
 using Raven.Database.Storage;
+using Raven.Database.Tasks;
 
 namespace Raven.Database.Indexing
 {
@@ -23,6 +25,8 @@ namespace Raven.Database.Indexing
     /// </summary>
     public class Index : IDisposable
     {
+        private const string documentIdName = "__document_id";
+        private const string isOnlyViewResultName = "__is_only_view_result";
         private readonly Directory directory;
         private readonly ILog log = LogManager.GetLogger(typeof(Index));
         private readonly string name;
@@ -82,10 +86,10 @@ namespace Raven.Database.Indexing
         {
             return new IndexQueryResult
             {
-                Key = document.Get("__document_id"),
+                Key = document.Get(documentIdName),
                 Projection = fieldsToFetch == null || fieldsToFetch.Length == 0 ? null :
                     new JObject(
-                        fieldsToFetch.Concat(new[] { "__document_id" }).Distinct()
+                        fieldsToFetch.Concat(new[] { documentIdName }).Distinct()
                             .SelectMany(name => document.GetFields(name) ?? new Field[0])
                             .Where(x => x != null)
                             .Select(fld => new JProperty(fld.Name(), fld.StringValue()))
@@ -132,8 +136,25 @@ namespace Raven.Database.Indexing
                 RecreateSearcher();
         }
 
-        public void IndexDocuments(AbstractViewGenerator viewGenerator, IEnumerable<object> documents, WorkContext context,
-                                   DocumentStorageActions actions)
+        public void IndexDocuments(
+            AbstractViewGenerator viewGenerator, 
+            IEnumerable<object> documents, 
+            WorkContext context,
+            DocumentStorageActions actions)
+        {
+            bool? isReducing = true;
+            if (viewGenerator.ReduceDefinition != null)
+                isReducing = false;
+            int count = HandleIndexing(viewGenerator, documents, actions, context, isReducing);
+            log.InfoFormat("Indexed {0} documents for {1}", count, name);
+        }
+
+        private int HandleIndexing(
+            AbstractViewGenerator viewGenerator, 
+            IEnumerable<object> documents, 
+            DocumentStorageActions actions, 
+            WorkContext context, 
+            bool? isReducing)
         {
             actions.SetCurrentIndexStatsTo(name);
             var count = 0;
@@ -142,51 +163,75 @@ namespace Raven.Database.Indexing
                 string currentId = null;
                 var converter = new JsonToLuceneDocumentConverter();
                 Document luceneDoc = null;
+                var reduceKeys = new HashSet<string>();
                 foreach (var doc in RobustEnumeration(documents, viewGenerator.MapDefinition, actions, context))
                 {
                     count++;
                     string newDocId;
                     var fields = converter.Index(doc, out newDocId);
-                    luceneDoc = FlushLuceneDocument(newDocId, currentId, luceneDoc, indexWriter);
+                    luceneDoc = FlushLuceneDocument(newDocId, currentId, luceneDoc, indexWriter, isReducing);
                     currentId = newDocId;
-                    foreach (var field in fields)
+                    if(viewGenerator.GroupByField != null)
                     {
-                        var valueAlreadyExisting = false;
-                        var existingFields = luceneDoc.GetFields(field.Name());
-                        if (existingFields != null)
-                        {
-                            var fieldCopy = field;
-                            valueAlreadyExisting = existingFields.Any(existingField => existingField.StringValue() == fieldCopy.StringValue());
-                        }
-                        if (valueAlreadyExisting)
-                            continue;
-                        luceneDoc.Add(field);
+                        var val = luceneDoc.Get(viewGenerator.GroupByField);
+                        if (val != null)
+                            reduceKeys.Add(val);
                     }
+                    AddFieldsToDocumentIfValueDoesnotExistsInTheDocument(luceneDoc, fields);
 
                     actions.IncrementSuccessIndexing();
                 }
 
                 if (luceneDoc != null)
-                    indexWriter.UpdateDocument(new Term("__document_id", currentId), luceneDoc);
-
-                indexWriter.UpdateDocument(new Term("__document_id", currentId), luceneDoc);
-
-
+                    indexWriter.UpdateDocument(new Term(documentIdName, currentId), luceneDoc);
+                foreach (var reduceKey in reduceKeys)
+                {
+                    actions.AddTask(new ReduceTask
+                    {
+                        ReduceKey = reduceKey,
+                        Index = viewGenerator.IndexName
+                    });
+                }
                 return luceneDoc != null;
             });
-            log.InfoFormat("Indexed {0} documents for {1}", count, name);
+            return count;
         }
 
-        private static Document FlushLuceneDocument(string newDocId, string currentId, Document luceneDoc,
-                                                    IndexWriter indexWriter)
+        private void AddFieldsToDocumentIfValueDoesnotExistsInTheDocument(Document luceneDoc, IEnumerable<Field> fields)
+        {
+            foreach (var field in fields)
+            {
+                var valueAlreadyExisting = false;
+                var existingFields = luceneDoc.GetFields(field.Name());
+                if (existingFields != null)
+                {
+                    var fieldCopy = field;
+                    valueAlreadyExisting = existingFields.Any(existingField => existingField.StringValue() == fieldCopy.StringValue());
+                }
+                if (valueAlreadyExisting)
+                    continue;
+                luceneDoc.Add(field);
+            }
+        }
+
+        private static Document FlushLuceneDocument(
+            string newDocId, string currentId, Document luceneDoc, IndexWriter indexWriter, bool? isReducing)
         {
             if (newDocId != currentId)
             {
                 if (luceneDoc != null)
-                    indexWriter.UpdateDocument(new Term("__document_id", currentId), luceneDoc);
+                {
+                    indexWriter.UpdateDocument(new Term(documentIdName, currentId), luceneDoc);
+                }
 
                 luceneDoc = new Document();
-                luceneDoc.Add(new Field("__document_id", newDocId, Field.Store.YES, Field.Index.UN_TOKENIZED));
+                luceneDoc.Add(new Field(documentIdName, newDocId, Field.Store.YES, Field.Index.UN_TOKENIZED));
+                if (isReducing.HasValue)
+                {
+                    var viewOnly = isReducing.Value ? "no" : "yes";
+                    luceneDoc.Add(new Field(isOnlyViewResultName, viewOnly, Field.Store.NO,
+                                            Field.Index.UN_TOKENIZED));
+                }
             }
             return luceneDoc;
         }
@@ -239,7 +284,7 @@ namespace Raven.Database.Indexing
             if (dic == null)
                 return null;
             object value;
-            dic.TryGetValue("__document_id", out value);
+            dic.TryGetValue(documentIdName, out value);
             if (value == null)
                 return null;
             return value.ToString();
@@ -251,7 +296,7 @@ namespace Raven.Database.Indexing
             if (dictionary == null)
                 return null;
             object docId;
-            dictionary.TryGetValue("__document_id", out docId);
+            dictionary.TryGetValue(documentIdName, out docId);
             return docId;
         }
 
@@ -276,7 +321,7 @@ namespace Raven.Database.Indexing
                 {
                     log.DebugFormat("Deleting ({0}) from {1}", string.Format(", ", keys), name);
                 }
-                writer.DeleteDocuments(keys.Select(k => new Term("__document_id", k)).ToArray());
+                writer.DeleteDocuments(keys.Select(k => new Term(documentIdName, k)).ToArray());
                 return true;
             });
         }
@@ -328,5 +373,41 @@ namespace Raven.Database.Indexing
         }
 
         #endregion
+
+        public void ReduceDocuments(AbstractViewGenerator viewGenerator, string reduceKey, WorkContext context)
+        {
+            context.TransactionaStorage.Batch(actions =>
+            {
+                int count = HandleIndexing(viewGenerator, ReduceKeyQuery(viewGenerator, reduceKey), actions, context, true);
+                log.InfoFormat("Reduced to {0} documents in {1}", count, name);
+
+                actions.Commit();
+            });
+        }
+
+        private IEnumerable<dynamic> ReduceKeyQuery(AbstractViewGenerator viewGenerator, string reduceKey)
+        {
+            using(searcher.Use())
+            {
+                var matchingDocuments = new TermQuery(new Term(viewGenerator.GroupByField, reduceKey));
+                var viewResults = new TermQuery(new Term(isOnlyViewResultName, "yes"));
+                var query = new BooleanQuery();
+                query.Add(matchingDocuments, BooleanClause.Occur.MUST);
+                query.Add(viewResults, BooleanClause.Occur.MUST);
+
+                var hits = searcher.Searcher.Search(query);
+
+                for (int i = 0; i < hits.Length(); i++)
+                {
+                    var document = hits.Doc(i);
+                    var expando = new ExpandoObject() as IDictionary<string,object>;
+                    foreach (Field field in document.GetFields())
+                    {
+                        expando[field.Name()] = field.StringValue();
+                    }
+                    yield return expando;
+                }
+            }
+        }
     }
 }

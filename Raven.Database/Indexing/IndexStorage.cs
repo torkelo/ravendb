@@ -120,5 +120,17 @@ namespace Raven.Database.Indexing
             }
             value.IndexDocuments(viewGenerator, docs, context, actions);
         }
+
+        public void Reduce(string index, AbstractViewGenerator viewGenerator, string reduceKey, WorkContext context)
+        {
+            Index value;
+            if (indexes.TryGetValue(index, out value) == false)
+            {
+                log.DebugFormat("Tried to reduce on a non existant index {0}, ignoring", index);
+                return;
+            }
+            value.ReduceDocuments(viewGenerator, reduceKey, context);
+      
+        }
     }
 }

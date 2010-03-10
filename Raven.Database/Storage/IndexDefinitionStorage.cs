@@ -45,6 +45,7 @@ namespace Raven.Database.Storage
         {
             var transformer = new DynamicViewCompiler(name, indexDef, null);
             var generator = transformer.GenerateInstance();
+            generator.IndexName = name;
             indexCache.AddOrUpdate(name, generator, (s, viewGenerator) => generator);
             File.WriteAllText(Path.Combine(path, transformer.Name + ".index"), indexDef);
             logger.InfoFormat("New index {0}:\r\n{1}\r\nCompiled to:\r\n{2}", transformer.Name, transformer.CompiledQueryText,
