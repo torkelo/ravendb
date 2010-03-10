@@ -35,7 +35,7 @@ namespace Raven.Database.Indexing
             {
                 log.DebugFormat("Loading saved index {0}", index);
                 var name = Path.GetFileName(index);
-                indexes.TryAdd(name, new Index(FSDirectory.GetDirectory(index, false), name));
+                indexes.TryAdd(name, new Index(FSDirectory.GetDirectory(index, false), name, false));
             }
         }
 
@@ -74,17 +74,17 @@ namespace Raven.Database.Indexing
             }
         }
 
-        public void CreateIndex(string name)
+        public void CreateIndex(string name, bool isMapReduce)
         {
             log.InfoFormat("Creating index {0}", name);
-            indexes.AddOrUpdate(name, BuildIndex, (s, index) => index);
+            indexes.AddOrUpdate(name, n => BuildIndex(n, isMapReduce), (s, index) => index);
         }
 
-        private Index BuildIndex(string name)
+        private Index BuildIndex(string name, bool isMapReduce)
         {
             var directory = FSDirectory.GetDirectory(Path.Combine(path, name), true);
             new IndexWriter(directory, new StandardAnalyzer()).Close(); //creating index structure
-            return new Index(directory, name);
+            return new Index(directory, name, isMapReduce);
         }
 
         public IEnumerable<IndexQueryResult> Query(string index, string query, int start, int pageSize, Reference<int> totalSize, string[] fieldsToFetch)

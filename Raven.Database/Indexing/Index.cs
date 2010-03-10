@@ -30,11 +30,13 @@ namespace Raven.Database.Indexing
         private readonly Directory directory;
         private readonly ILog log = LogManager.GetLogger(typeof(Index));
         private readonly string name;
+        private readonly bool isMapReduce;
         private CurrentIndexSearcher searcher;
 
-        public Index(Directory directory, string name)
+        public Index(Directory directory, string name, bool isMapReduce)
         {
             this.name = name;
+            this.isMapReduce = isMapReduce;
             log.DebugFormat("Creating index for {0}", name);
             this.directory = directory;
             searcher = new CurrentIndexSearcher
@@ -60,9 +62,18 @@ namespace Raven.Database.Indexing
                 var indexSearcher = searcher.Searcher;
                 if (string.IsNullOrEmpty(query) == false)
                 {
-                    return SearchIndex(query, indexSearcher, totalSize, start, pageSize, fieldsToFetch);
+                    foreach (var result in SearchIndex(query, indexSearcher, totalSize, start, pageSize, fieldsToFetch))
+                    {
+                        yield return result;
+                    }
                 }
-                return BrowseIndex(indexSearcher, totalSize, start, pageSize, fieldsToFetch);
+                else
+                {
+                    foreach (var result in BrowseIndex(indexSearcher, totalSize, start, pageSize, fieldsToFetch))
+                    {
+                        yield return result;
+                    }
+                }
             }
         }
 
@@ -82,15 +93,17 @@ namespace Raven.Database.Indexing
             }
         }
 
-        private static IndexQueryResult RetrieveDocument(Document document, string[] fieldsToFetch)
+        private IndexQueryResult RetrieveDocument(Document document, string[] fieldsToFetch)
         {
+            if (isMapReduce)
+                fieldsToFetch = document.GetFields().Cast<Fieldable>().Select(x => x.Name()).ToArray();
             return new IndexQueryResult
             {
                 Key = document.Get(documentIdName),
                 Projection = fieldsToFetch == null || fieldsToFetch.Length == 0 ? null :
                     new JObject(
                         fieldsToFetch.Concat(new[] { documentIdName }).Distinct()
-                            .SelectMany(name => document.GetFields(name) ?? new Field[0])
+                            .SelectMany(fldName => document.GetFields(fldName) ?? new Field[0])
                             .Where(x => x != null)
                             .Select(fld => new JProperty(fld.Name(), fld.StringValue()))
                             .GroupBy(x => x.Name)
@@ -110,6 +123,8 @@ namespace Raven.Database.Indexing
                                                 int start, int pageSize, string[] fieldsToFetch)
         {
             log.DebugFormat("Issuing query on index {0} for: {1}", name, query);
+            if (isMapReduce)
+                query += " -" + isOnlyViewResultName + ":no";
             var luceneQuery = new QueryParser("", new StandardAnalyzer()).Parse(query);
             var search = indexSearcher.Search(luceneQuery);
             totalSize.Value = search.Length();
@@ -137,8 +152,8 @@ namespace Raven.Database.Indexing
         }
 
         public void IndexDocuments(
-            AbstractViewGenerator viewGenerator, 
-            IEnumerable<object> documents, 
+            AbstractViewGenerator viewGenerator,
+            IEnumerable<object> documents,
             WorkContext context,
             DocumentStorageActions actions)
         {
@@ -150,10 +165,10 @@ namespace Raven.Database.Indexing
         }
 
         private int HandleIndexing(
-            AbstractViewGenerator viewGenerator, 
-            IEnumerable<object> documents, 
-            DocumentStorageActions actions, 
-            WorkContext context, 
+            AbstractViewGenerator viewGenerator,
+            IEnumerable<object> documents,
+            DocumentStorageActions actions,
+            WorkContext context,
             bool? isReducing)
         {
             actions.SetCurrentIndexStatsTo(name);
@@ -164,40 +179,46 @@ namespace Raven.Database.Indexing
                 var converter = new JsonToLuceneDocumentConverter();
                 Document luceneDoc = null;
                 var reduceKeys = new HashSet<string>();
-                foreach (var doc in RobustEnumeration(documents, viewGenerator.MapDefinition, actions, context))
+                var mapDefinition = isReducing == true ? viewGenerator.ReduceDefinition : viewGenerator.MapDefinition;
+                foreach (var doc in RobustEnumeration(documents, mapDefinition, actions, context))
                 {
                     count++;
                     string newDocId;
                     var fields = converter.Index(doc, out newDocId);
                     luceneDoc = FlushLuceneDocument(newDocId, currentId, luceneDoc, indexWriter, isReducing);
                     currentId = newDocId;
-                    if(viewGenerator.GroupByField != null)
+                    AddFieldsToDocumentIfValueDoesnotExistsInTheDocument(luceneDoc, fields);
+
+                    if (viewGenerator.GroupByField != null)
                     {
                         var val = luceneDoc.Get(viewGenerator.GroupByField);
                         if (val != null)
                             reduceKeys.Add(val);
                     }
-                    AddFieldsToDocumentIfValueDoesnotExistsInTheDocument(luceneDoc, fields);
 
                     actions.IncrementSuccessIndexing();
                 }
 
                 if (luceneDoc != null)
                     indexWriter.UpdateDocument(new Term(documentIdName, currentId), luceneDoc);
-                foreach (var reduceKey in reduceKeys)
+
+                if(isReducing == true)
                 {
-                    actions.AddTask(new ReduceTask
+                    foreach (var reduceKey in reduceKeys)
                     {
-                        ReduceKey = reduceKey,
-                        Index = viewGenerator.IndexName
-                    });
+                        actions.AddTask(new ReduceTask
+                        {
+                            ReduceKey = reduceKey,
+                            Index = viewGenerator.IndexName
+                        });
+                    }
                 }
                 return luceneDoc != null;
             });
             return count;
         }
 
-        private void AddFieldsToDocumentIfValueDoesnotExistsInTheDocument(Document luceneDoc, IEnumerable<Field> fields)
+        private static void AddFieldsToDocumentIfValueDoesnotExistsInTheDocument(Document luceneDoc, IEnumerable<Field> fields)
         {
             foreach (var field in fields)
             {
@@ -225,11 +246,14 @@ namespace Raven.Database.Indexing
                 }
 
                 luceneDoc = new Document();
-                luceneDoc.Add(new Field(documentIdName, newDocId, Field.Store.YES, Field.Index.UN_TOKENIZED));
+                if (true.Equals(isReducing) == false)
+                {
+                    luceneDoc.Add(new Field(documentIdName, newDocId, Field.Store.YES, Field.Index.UN_TOKENIZED));
+                }
                 if (isReducing.HasValue)
                 {
-                    var viewOnly = isReducing.Value ? "no" : "yes";
-                    luceneDoc.Add(new Field(isOnlyViewResultName, viewOnly, Field.Store.NO,
+                    var isOnlyPartialResult = isReducing.Value ? "yes" : "no";
+                    luceneDoc.Add(new Field(isOnlyViewResultName, isOnlyPartialResult, Field.Store.YES,
                                             Field.Index.UN_TOKENIZED));
                 }
             }
@@ -379,7 +403,7 @@ namespace Raven.Database.Indexing
             context.TransactionaStorage.Batch(actions =>
             {
                 int count = HandleIndexing(viewGenerator, ReduceKeyQuery(viewGenerator, reduceKey), actions, context, true);
-                log.InfoFormat("Reduced to {0} documents in {1}", count, name);
+                log.DebugFormat("Reduced to {0} documents in {1}", count, name);
 
                 actions.Commit();
             });
@@ -387,20 +411,20 @@ namespace Raven.Database.Indexing
 
         private IEnumerable<dynamic> ReduceKeyQuery(AbstractViewGenerator viewGenerator, string reduceKey)
         {
-            using(searcher.Use())
+            using (searcher.Use())
             {
                 var matchingDocuments = new TermQuery(new Term(viewGenerator.GroupByField, reduceKey));
-                var viewResults = new TermQuery(new Term(isOnlyViewResultName, "yes"));
+                var viewResults = new TermQuery(new Term(isOnlyViewResultName, "no"));
                 var query = new BooleanQuery();
                 query.Add(matchingDocuments, BooleanClause.Occur.MUST);
                 query.Add(viewResults, BooleanClause.Occur.MUST);
 
                 var hits = searcher.Searcher.Search(query);
-
+                log.DebugFormat("Found {0} documents to reduce {1} using {2}", hits.Length(), reduceKey, query);
                 for (int i = 0; i < hits.Length(); i++)
                 {
                     var document = hits.Doc(i);
-                    var expando = new ExpandoObject() as IDictionary<string,object>;
+                    var expando = new ExpandoObject() as IDictionary<string, object>;
                     foreach (Field field in document.GetFields())
                     {
                         expando[field.Name()] = field.StringValue();

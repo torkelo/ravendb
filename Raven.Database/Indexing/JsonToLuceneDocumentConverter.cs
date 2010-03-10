@@ -12,7 +12,6 @@ namespace Raven.Database.Indexing
         {
             var properties = TypeDescriptor.GetProperties(val).Cast<PropertyDescriptor>().ToArray();
             var id = properties.First(x => x.Name == "__document_id");
-
             docId = id.GetValue(val).ToString();
 
             return (from property in properties

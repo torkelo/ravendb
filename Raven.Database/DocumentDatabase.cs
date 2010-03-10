@@ -163,9 +163,14 @@ namespace Raven.Database
             workContext.NotifyAboutWork();
         }
 
-        public string PutIndex(string name, string indexDef)
+        public string PutIndex(string name, string mapDef)
         {
-            switch (IndexDefinitionStorage.FindIndexCreationOptionsOptions(name, indexDef))
+            return PutIndex(name, mapDef, null);   
+        }
+
+        public string PutIndex(string name, string mapDef, string reduceDef)
+        {
+            switch (IndexDefinitionStorage.FindIndexCreationOptionsOptions(name, mapDef))
             {
                 case IndexCreationOptions.Noop:
                     return name;
@@ -173,8 +178,8 @@ namespace Raven.Database
                     DeleteIndex(name);
                     break;
             }
-            IndexDefinitionStorage.AddIndex(name, indexDef);
-            IndexStorage.CreateIndex(name);
+            IndexDefinitionStorage.AddIndex(name, mapDef, reduceDef);
+            IndexStorage.CreateIndex(name,  reduceDef != null);
             TransactionalStorage.Batch(actions =>
             {
                 actions.AddIndex(name);
