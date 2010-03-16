@@ -1,4 +1,6 @@
 ﻿using System;
+using System.Collections;
+using System.Collections.Generic;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
@@ -53,12 +55,15 @@ namespace Raven.Client.Linq
                     Thread.Sleep(100);
                 }
 
-                return (TResult)(object)result.Results.Select(q =>
+                var genericList = typeof (TResult);
+                var entityType = typeof(TResult).GetGenericArguments()[0];
+                var listOfEntitiesType = typeof(List<>).MakeGenericType(entityType);
+                var list = (IList)Activator.CreateInstance(listOfEntitiesType);
+                foreach (var individualResult in result.Results)
                 {
-                    var id = q.Last.First.Value<string>("@id");
-                    var entity = JsonConvert.DeserializeObject(q.ToString());
-                    return entity;
-                }).ToList();
+                    list.Add(JsonConvert.DeserializeObject(individualResult.ToString(), entityType));
+                }
+                return (TResult) list;
             }
             
             throw new NotSupportedException("Method Not Supported");
