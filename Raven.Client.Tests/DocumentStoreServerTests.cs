@@ -123,7 +123,9 @@ namespace Raven.Client.Tests
 
                 // Should translate to 
                 //documentStore.DatabaseCommands.Query("getByName", ":name=\"Company\"", 0, int.MaxValue);
-                Assert.Equal(2, query.ToList().Count);
+                var resultList = query.ToList();
+                Assert.Equal(2, resultList.Count);
+                Assert.True(resultList.All(q => q.Name == "Company"));
             }
         }
 
@@ -140,10 +142,6 @@ namespace Raven.Client.Tests
                 var session = documentStore.OpenSession();
 
                 session.Store(new Company { Name = "Company", Address1 = "First Address"});
-                session.Store(new Company { Name = "Company" });
-                session.Store(new Company { Name = "Company" });
-                session.Store(new Company { Name = "Company" });
-                session.Store(new Company { Name = "Company" });
                 session.Store(new Company { Name = "Company" });
                 session.Store(new Company { Name = "Company" });
                 session.Store(new Company { Name = "Company" });
