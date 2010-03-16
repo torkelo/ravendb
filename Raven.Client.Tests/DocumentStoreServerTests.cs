@@ -101,7 +101,7 @@ namespace Raven.Client.Tests
         }
 
         [Fact]
-        public void Should_query_database_via_index()
+        public void Should_query_database_via_index_using_where()
         {
             DivanServer.EnsureCanListenToWhenInNonAdminContext(8080);
             using (var server = new DivanServer(new RavenConfiguration { Port = 8080, DataDirectory = path }))
@@ -123,8 +123,48 @@ namespace Raven.Client.Tests
 
                 // Should translate to 
                 //documentStore.DatabaseCommands.Query("getByName", ":name=\"Company\"", 0, int.MaxValue);
-
                 Assert.Equal(2, query.ToList().Count);
+            }
+        }
+
+        [Fact]
+        public void Should_query_database_via_index_using_with_paging()
+        {
+            DivanServer.EnsureCanListenToWhenInNonAdminContext(8080);
+            using (var server = new DivanServer(new RavenConfiguration { Port = 8080, DataDirectory = path }))
+            {
+                var documentStore = new DocumentStore("localhost", 8080);
+                documentStore.Initialise();
+                documentStore.DatabaseCommands.PutIndex("getByName", "from entity in docs select new { entity.type, entity.Name };");
+
+                var session = documentStore.OpenSession();
+
+                session.Store(new Company { Name = "Company", Address1 = "First Address"});
+                session.Store(new Company { Name = "Company" });
+                session.Store(new Company { Name = "Company" });
+                session.Store(new Company { Name = "Company" });
+                session.Store(new Company { Name = "Company" });
+                session.Store(new Company { Name = "Company" });
+                session.Store(new Company { Name = "Company" });
+                session.Store(new Company { Name = "Company" });
+                session.Store(new Company { Name = "Company" });
+                session.Store(new Company { Name = "Company" });
+                session.Store(new Company { Name = "Company", Address1 = "Last Address" });
+                session.Store(new Company { Name = "Bobs Builders" });
+
+
+                var query = from company in session.Query<Company>("getByName")
+                            where company.Name == "Company"
+                            select company;
+
+                // Should translate to 
+                //documentStore.DatabaseCommands.Query("getByName", ":name=\"Company\"", 2, 5);
+
+                var resultList = query.Skip(1).Take(5).ToList();
+                Assert.Equal(5, resultList.Count);
+                Assert.False(resultList.Any(q => q.Address1 == "First Address"));
+                Assert.True(resultList.All(q => q.Name == "Company"));
+                Assert.False(resultList.Any(q => q.Address1 == "Last Address"));
             }
         }
 

@@ -14,6 +14,8 @@ namespace Raven.Client.Linq
     {
         private readonly IDatabaseCommands Commands;
         private readonly string IndexName;
+        private int startPosition = 0;
+        private int totalAmountOfRecords = int.MaxValue;
 
         public DocumentQueryProvider(IDatabaseCommands commands, string indexName)
         {
@@ -39,6 +41,11 @@ namespace Raven.Client.Linq
         public TResult Execute<TResult>(Expression expression)
         {
             var methodCall = expression as MethodCallExpression;
+
+            var entityType = typeof(TResult).GetGenericArguments()[0];
+            var listOfEntitiesType = typeof(List<>).MakeGenericType(entityType);
+            var list = (IList)Activator.CreateInstance(listOfEntitiesType);
+
             if ((methodCall != null) && (methodCall.Method.Name == "Where"))
             {
                 var a = methodCall.Arguments[1] as UnaryExpression;
@@ -47,25 +54,41 @@ namespace Raven.Client.Linq
                 var propertyName = c.Left as MemberExpression;
                 var constant = c.Right as ConstantExpression;
                 var queryString = propertyName.Member.Name + ":" + constant.Value;
-                var result = Commands.Query(IndexName, queryString, 0, int.MaxValue);
+                
+                var result = Commands.Query(IndexName, queryString, startPosition, totalAmountOfRecords);
 
                 while(result.IsStale)
                 {
-                    result = Commands.Query(IndexName, queryString, 0, int.MaxValue);
+                    result = Commands.Query(IndexName, queryString, startPosition, totalAmountOfRecords);
                     Thread.Sleep(100);
                 }
 
-                var genericList = typeof (TResult);
-                var entityType = typeof(TResult).GetGenericArguments()[0];
-                var listOfEntitiesType = typeof(List<>).MakeGenericType(entityType);
-                var list = (IList)Activator.CreateInstance(listOfEntitiesType);
                 foreach (var individualResult in result.Results)
                 {
                     list.Add(JsonConvert.DeserializeObject(individualResult.ToString(), entityType));
                 }
-                return (TResult) list;
+
+                return (TResult)list;
             }
-            
+
+            if ((methodCall != null) && (methodCall.Method.Name == "Take"))
+            {
+                var constant = methodCall.Arguments[1] as ConstantExpression;
+                totalAmountOfRecords = (int)constant.Value;
+            }
+
+            if ((methodCall != null) && (methodCall.Method.Name == "Skip"))
+            {
+                var constant = methodCall.Arguments[1] as ConstantExpression;
+                startPosition = (int)constant.Value;
+            }
+
+            if (methodCall != null)
+            {
+                return Execute<TResult>(methodCall.Arguments[0]);
+            }
+
+            return (TResult) list;            
             throw new NotSupportedException("Method Not Supported");
         }
     }
